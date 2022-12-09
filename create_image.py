@@ -1,4 +1,15 @@
-﻿import json
+﻿"""
+Enviroments >>
+
+DB_RESOURCE	dynamodb
+INSTANCE	i-07a5be2b5180a2ba6
+REGION	eu-north-1
+TABLE_NAME	Image
+"""
+
+
+
+import json
 import os
 import boto3
 import datetime
