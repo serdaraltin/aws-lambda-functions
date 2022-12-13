@@ -1,16 +1,4 @@
-﻿"""
-Enviroments >>
-
-DB_RESOURCE	dynamodb
-INSTANCE_TYPE	g4dn.xlarge
-KEY_NAME	Base
-REGION	eu-north-1
-SECURITY_GROUP_ID	sg-04707065899d32695
-TABLE_NAME	Image
-"""
-
-
-import json
+﻿import json
 import os
 import boto3
 import datetime
@@ -27,11 +15,14 @@ EC2_RESOURCE = boto3.resource('ec2', region_name=REGION)
 DB_CLIENT  = boto3.resource(DB_RESOURCE)
 TABLE = DB_CLIENT.Table(TABLE_NAME)
 
+TABLE_NAME_IMAGE = "Image"
+
 DATE = str(datetime.datetime.now().strftime("%Y_%m_%d-%H_%M_%S"))
 
 
 def get_last_ami():
-    response = TABLE.scan()
+    TABLE_IMAGE = DB_CLIENT.Table(TABLE_NAME_IMAGE)
+    response = TABLE_IMAGE.scan()
     data = response['Items']
     last_index = len(data)-1
     return data[last_index]['ami_id']
@@ -58,13 +49,44 @@ def create_instance(ami_id):
         TagSpecifications=TagSpecifications,
         SecurityGroupIds=[SECURITY_GROUP_ID]
     )
+
     return instance[0]
     
+def get_ip(instance_id):
+    ec2 = boto3.client('ec2')
+    instances = ec2.describe_instances(InstanceIds=[instance_id])
+    return instances['Reservations'][0]['Instances'][0]['PublicIpAddress']
+  
+  
+def add_instance(instance_id, public_ip, begin_map):
+    table = DB_CLIENT.Table(TABLE_NAME)
+    
+    table.put_item(
+        Item={
+            'instance_id': instance_id ,
+            'public_ip': public_ip,
+            'begin_map': begin_map
+        }    
+    )  
+
 def lambda_handler(event, context):
 
-    create_instance(get_last_ami())
+    #instance = create_instance(get_last_ami())
+    instance_id = 'i-07a5be2b5180a2ba6'#instance.instance_id
+    public_ip = get_ip(instance_id)
+    begin_map = event['begin_map']
+    
+        
+    #add_instance(instance_id, public_ip, begin_map)
+    
+
     return {
         'statusCode': 200,
-        'body': 'pass'
+        'headers': {'Content-Type': 'application/json'},
+        'body': {
+            'instance_id': instance_id,
+            'public_ip': public_ip,
+            'begin_map': begin_map
+        }
     }
  
