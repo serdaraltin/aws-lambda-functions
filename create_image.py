@@ -7,12 +7,12 @@ REGION	eu-north-1
 TABLE_NAME	Image
 """
 
-
-
 import json
 import os
 import boto3
 import datetime
+import dateutil.tz
+import time
 
 INSTANCEID = os.environ["INSTANCE"]
 REGION = os.environ["REGION"]
@@ -21,38 +21,38 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 EC2_CLIENT = boto3.client('ec2', region_name=REGION)
 DB_CLIENT = boto3.resource(os.environ['DB_RESOURCE'])
 
-DATE = str(datetime.datetime.now().strftime("%Y_%m_%d-%H_%M_%S"))
+istanbul = dateutil.tz.gettz('Asia/Istanbul')
+current_date = datetime.datetime.now(tz=istanbul)
+DATE = str(current_date.strftime("%Y-%m-%dT%H-%M-%S"))
 
 def add_image(ami_image, instance_id=INSTANCEID, table_name=TABLE_NAME, db_client=DB_CLIENT):
     table = DB_CLIENT.Table(TABLE_NAME)
     
-    ami_id = ami_image['ImageId']
-    creation_date = ami_image['CreationDate']
+    ami={
+        'ami_id': ami_image['ImageId'],
+        'instance_id': instance_id,
+        'creation_date': DATE
+    }    
     
-    table.put_item(
-        Item={
-                'ami_id': ami_id,
-                'instance_id': instance_id,
-                'creation_date': creation_date
-        }    
-    )
+    table.put_item(Item=ami)
+    return {
+        'statusCode': 200,
+        'body': ami
+    }
     
 def lambda_handler(event, context):
-    name = "AutoCreate("+INSTANCEID+"/"+ DATE +")"
-    description = "AMI for "+ INSTANCEID +" created by lambda (from serdar)"
+    name = "AutoCreate("+ DATE +")"
+    description = "AMI for "+ INSTANCEID +" created with lambda (by Serdar)"
    
-    ami_image = EC2_CLIENT.create_image(InstanceId=INSTANCEID,  
-    Name=name, NoReboot=True)
+    ami_image = EC2_CLIENT.create_image(InstanceId=INSTANCEID, Name=name, Description=description, NoReboot=True)
+        
+    time.sleep(1)
     
     image_list = EC2_CLIENT.describe_images(Owners=['self'])
+
     for ami_item in image_list['Images']:
         if ami_item['ImageId'] == ami_image['ImageId']:
-            add_image(ami_item)
-            return {
-                'statusCode': 200,
-                'body': json.dumps('Created new ami from Instance('+ INSTANCEID+")")
-            }
-            
+            return add_image(ami_item)
             
     return {
             'statusCode': 417,

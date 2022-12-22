@@ -2,30 +2,41 @@
 import os
 import boto3
 import datetime
+import dateutil.tz
 
 INSTANCE_TYPE = os.environ['INSTANCE_TYPE']
 KEY_NAME = os.environ['KEY_NAME']
 SECURITY_GROUP_ID = os.environ['SECURITY_GROUP_ID']
+HOSTED_ZONE_ID = os.environ['HOSTED_ZONE_ID']
+HOSTED_ZONE_DOMAIN = os.environ['HOSTED_ZONE_DOMAIN']
 
 REGION = os.environ["REGION"]
 DB_RESOURCE = os.environ['DB_RESOURCE']
 TABLE_NAME = os.environ["TABLE_NAME"]
 
 EC2_RESOURCE = boto3.resource('ec2', region_name=REGION)
+EC2_CLIENT = boto3.client('ec2', region_name=REGION)
 DB_CLIENT  = boto3.resource(DB_RESOURCE)
 TABLE = DB_CLIENT.Table(TABLE_NAME)
-
 TABLE_NAME_IMAGE = "Image"
 
-DATE = str(datetime.datetime.now().strftime("%Y_%m_%d-%H_%M_%S"))
+istanbul = dateutil.tz.gettz('Asia/Istanbul')
+current_date = datetime.datetime.now(tz=istanbul)
+DATE = str(current_date.strftime("%Y-%m-%dT%H-%M-%S"))
 
+ROUTE53_CLIENT = boto3.client("route53", region_name=REGION)
 
 def get_last_ami():
     TABLE_IMAGE = DB_CLIENT.Table(TABLE_NAME_IMAGE)
     response = TABLE_IMAGE.scan()
     data = response['Items']
-    last_index = len(data)-1
-    return data[last_index]['ami_id']
+    
+    last = data[0]
+    for item in data:
+        if item['creation_date'] > last['creation_date']:
+            last = item
+            
+    return last
 
 def create_instance(ami_id):
     TagSpecifications=[
@@ -61,32 +72,59 @@ def get_ip(instance_id):
 def add_instance(instance_id, public_ip, begin_map):
     table = DB_CLIENT.Table(TABLE_NAME)
     
-    table.put_item(
-        Item={
-            'instance_id': instance_id ,
-            'public_ip': public_ip,
-            'begin_map': begin_map
-        }    
-    )  
-
-def lambda_handler(event, context):
-
-    #instance = create_instance(get_last_ami())
-    instance_id = 'i-07a5be2b5180a2ba6'#instance.instance_id
-    public_ip = get_ip(instance_id)
-    begin_map = event['begin_map']
+    instance={
+        'instance_id': instance_id ,
+        'public_ip': public_ip,
+        'begin_map': begin_map,
+        'creation_date': DATE
+    }  
+    table.put_item(Item=instance)  
     
-        
-    #add_instance(instance_id, public_ip, begin_map)
-    
-
     return {
         'statusCode': 200,
         'headers': {'Content-Type': 'application/json'},
-        'body': {
-            'instance_id': instance_id,
-            'public_ip': public_ip,
-            'begin_map': begin_map
-        }
+        'body': instance
     }
+    
+def update_subdomain_a_record(public_ip):
+    aName = public_ip.replace(".", "-")
+    aName = aName + HOSTED_ZONE_DOMAIN
+    
+    ROUTE53_CLIENT.change_resource_record_sets(
+        HostedZoneId=HOSTED_ZONE_ID,
+        ChangeBatch={
+            "Changes": [
+                {
+                    "Action": "UPSERT",
+                    "ResourceRecordSet": {
+                        "Name": aName,
+                        "Type": "A",
+                        "ResourceRecords": [
+                            {
+                                "Value": public_ip
+                            }
+                        ],
+                        "TTL": 300,
+                    },
+                }
+            ]
+        },
+    )
+
+def lambda_handler(event, context):
+    instance = create_instance(get_last_ami())
+    instance_id = instance.instance_id
+    public_ip = get_ip(instance_id)
+    begin_map = 'default'
+    try:        
+        begin_map = event['begin_map']
+    except :    
+        pass
+
+    retvalue = add_instance(instance_id, public_ip, begin_map)
+    update_subdomain_a_record(public_ip)
+    
+    return retvalue
+
+
  
