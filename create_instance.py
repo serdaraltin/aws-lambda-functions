@@ -27,16 +27,16 @@ DATE = str(current_date.strftime("%Y-%m-%dT%H-%M-%S"))
 ROUTE53_CLIENT = boto3.client("route53", region_name=REGION)
 
 def get_last_ami():
+    def get_creation_date(element):
+        return element['creation_date']
+        
     TABLE_IMAGE = DB_CLIENT.Table(TABLE_NAME_IMAGE)
     response = TABLE_IMAGE.scan()
     data = response['Items']
     
-    last = data[0]
-    for item in data:
-        if item['creation_date'] > last['creation_date']:
-            last = item
-            
-    return last
+    data.sort(key=get_creation_date)
+    
+    return data[-1]['ami_id']
 
 def create_instance(ami_id):
     TagSpecifications=[
