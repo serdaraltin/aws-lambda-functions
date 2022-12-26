@@ -1,112 +1,130 @@
-﻿"""
-Enviroments >>
-
-DB_RESOURCE	dynamodb
-INSTANCE	i-07a5be2b5180a2ba6
-REGION	eu-north-1
-TABLE_NAME	Image
-"""
-
-import json
+﻿import json
 import os
 import boto3
 import datetime
 import dateutil.tz
-import time
 
-INSTANCEID = os.environ["INSTANCE"]
+INSTANCE_TYPE = os.environ['INSTANCE_TYPE']
+KEY_NAME = os.environ['KEY_NAME']
+SECURITY_GROUP_ID = os.environ['SECURITY_GROUP_ID']
+HOSTED_ZONE_ID = os.environ['HOSTED_ZONE_ID']
+HOSTED_ZONE_DOMAIN = os.environ['HOSTED_ZONE_DOMAIN']
+
 REGION = os.environ["REGION"]
+DB_RESOURCE = os.environ['DB_RESOURCE']
 TABLE_NAME = os.environ["TABLE_NAME"]
 
+EC2_RESOURCE = boto3.resource('ec2', region_name=REGION)
 EC2_CLIENT = boto3.client('ec2', region_name=REGION)
-DB_CLIENT = boto3.resource(os.environ['DB_RESOURCE'])
+DB_CLIENT  = boto3.resource(DB_RESOURCE)
+TABLE = DB_CLIENT.Table(TABLE_NAME)
+TABLE_NAME_IMAGE = "Image"
 
+istanbul = dateutil.tz.gettz('Asia/Istanbul')
+current_date = datetime.datetime.now(tz=istanbul)
+DATE = str(current_date.strftime("%Y-%m-%dT%H-%M-%S"))
 
-def get_datetime():
-    istanbul = dateutil.tz.gettz('Asia/Istanbul')
-    current_date = datetime.datetime.now(tz=istanbul)
-    return str(current_date.strftime("%Y-%m-%dT%H-%M-%S"))
+ROUTE53_CLIENT = boto3.client("route53", region_name=REGION)
 
-def get_image_list():
-    return EC2_CLIENT.describe_images(Owners=['self'])['Images']
-
-def check_image(ami_id):
-    for item in get_image_list():
-        if item['ImageId'] == ami_id:
-            return True
-    return False
-
-def check_record(ami_id):
-    TABLE_IMAGE = DB_CLIENT.Table(TABLE_NAME)
-    response = TABLE_IMAGE.scan()
-    images = response['Items']
-    
-    for image in images:
-        
-        if ami_id == image['ami_id']:
-            print(image['ami_id'], ami_id)
-            return True
-    return False
-    
-def delete_snapshot(ami_id):
-    my_id = boto3.client('sts').get_caller_identity()['Account']
-    snapshots = EC2_CLIENT.describe_snapshots(MaxResults=1000, OwnerIds=[my_id])['Snapshots']
-    for snapshot in snapshots:
-        if ami_id in snapshot['Description']:
-            return EC2_CLIENT.delete_snapshot(SnapshotId=snapshot['SnapshotId'])
-            
-    return None
-    
-    
-def delete_image(ami_id):
-    if check_image(ami_id):       
-        deleted_image = EC2_CLIENT.deregister_image(DryRun=False, ImageId=ami_id)
-        return (deleted_image, delete_snapshot(ami_id))
-
-
-def clean_old_image(deep=2):
+def get_last_ami():
     def get_creation_date(element):
-        return element['CreationDate']
+        return element['creation_date']
         
-    images = get_image_list()
-    images.sort(key=get_creation_date)
+    TABLE_IMAGE = DB_CLIENT.Table(TABLE_NAME_IMAGE)
+    response = TABLE_IMAGE.scan()
+    data = response['Items']
     
-    for i in range(0,len(images)-deep):
-        if check_record(images[i]['ImageId']):
-            delete_image(images[i]['ImageId'])
+    data.sort(key=get_creation_date)
+    
+    return data[-1]['ami_id']
 
-def add_image(ami_id, instance_id=INSTANCEID, table_name=TABLE_NAME, db_client=DB_CLIENT):
+def create_instance(ami_id):
+    TagSpecifications=[
+        {
+            'ResourceType': 'instance',
+            'Tags': [
+                {
+                    'Key': 'Name',
+                    'Value': 'AutoCreate('+ami_id+'/'+ DATE +')'
+                },
+            ]
+        },
+    ]
+    
+    instance = EC2_RESOURCE.create_instances(
+        ImageId=ami_id,
+        InstanceType=INSTANCE_TYPE,
+        KeyName=KEY_NAME,
+        MaxCount=1,
+        MinCount=1,
+        TagSpecifications=TagSpecifications,
+        SecurityGroupIds=[SECURITY_GROUP_ID]
+    )
+
+    return instance[0]
+    
+def get_ip(instance_id):
+    ec2 = boto3.client('ec2')
+    instances = ec2.describe_instances(InstanceIds=[instance_id])
+    return instances['Reservations'][0]['Instances'][0]['PublicIpAddress']
+  
+  
+def add_instance(instance_id, public_ip, begin_map):
     table = DB_CLIENT.Table(TABLE_NAME)
     
-    ami={
-        'ami_id': ami_id,
-        'instance_id': instance_id,
-        'creation_date': get_datetime()
-    }    
+    instance={
+        'instance_id': instance_id ,
+        'public_ip': public_ip,
+        'begin_map': begin_map,
+        'creation_date': DATE
+    }  
+    table.put_item(Item=instance)  
     
-    table.put_item(Item=ami)
-    return ami
+    return {
+        'statusCode': 200,
+        'headers': {'Content-Type': 'application/json'},
+        'body': instance
+    }
+    
+def update_subdomain_a_record(public_ip):
+    aName = public_ip.replace(".", "-")
+    aName = aName + HOSTED_ZONE_DOMAIN
+    
+    ROUTE53_CLIENT.change_resource_record_sets(
+        HostedZoneId=HOSTED_ZONE_ID,
+        ChangeBatch={
+            "Changes": [
+                {
+                    "Action": "UPSERT",
+                    "ResourceRecordSet": {
+                        "Name": aName,
+                        "Type": "A",
+                        "ResourceRecords": [
+                            {
+                                "Value": public_ip
+                            }
+                        ],
+                        "TTL": 300,
+                    },
+                }
+            ]
+        },
+    )
 
 def lambda_handler(event, context):
-    if False:
-        #Test Scope
-        return clean_old_image()
-        
-    name = "AutoCreate("+ get_datetime() +")"
-    description = "AMI for "+ INSTANCEID +" created with lambda (by Serdar)"
-   
-    new_image = EC2_CLIENT.create_image(InstanceId=INSTANCEID, Name=name, Description=description, NoReboot=True)
-    time.sleep(1)
+    instance = create_instance(get_last_ami())
+    instance_id = instance.instance_id
+    public_ip = get_ip(instance_id)
+    begin_map = 'default'
+    try:        
+        begin_map = event['begin_map']
+    except :    
+        pass
+
+    retvalue = add_instance(instance_id, public_ip, begin_map)
+    update_subdomain_a_record(public_ip)
     
-    if check_image(new_image['ImageId']):
-        record = add_image(new_image['ImageId'])
-        clean_old_image()
-        return {
-            'statusCode': 200,
-            'body': record
-        }
-    else:
-        return {
-            'statusCode': 417,
-            'body': json.dumps('Cannot create new image !')
-        }
+    return retvalue
+
+
+ 
